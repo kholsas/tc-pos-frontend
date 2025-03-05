@@ -1,4 +1,4 @@
-package za.co.tech.code.pointofsale;
+package za.co.tech.code.pointofsale.frontend;
 
 public class SaleItem {
     private Product product;

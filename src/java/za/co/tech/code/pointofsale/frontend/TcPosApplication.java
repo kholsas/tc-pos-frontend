@@ -1,4 +1,4 @@
-package za.co.tech.code.pointofsale;
+package za.co.tech.code.pointofsale.frontend;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.http.client.methods.CloseableHttpResponse;
@@ -13,10 +13,16 @@ import javax.print.*;
 import javax.print.attribute.HashPrintRequestAttributeSet;
 import javax.print.attribute.PrintRequestAttributeSet;
 import javax.swing.*;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -29,17 +35,21 @@ public class TcPosApplication extends JFrame {
     private JLabel totalLabel;
     private List<SaleItem> cart;
     private double total;
+    private JTextField searchField;
+    private JList<Product> searchResultsList;
+    private DefaultListModel<Product> searchResultsModel;
 
     public TcPosApplication() {
         cart = new ArrayList<>();
         total = 0.0;
 
         setTitle("TC-POS - Cashier Interface");
-        setSize(700, 500);
+        setSize(1000, 600); // Increased size for better visibility
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout(10, 10));
         getContentPane().setBackground(Color.WHITE);
 
+        // Top Panel: Barcode Entry
         JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 10));
         topPanel.setBackground(new Color(240, 240, 240));
         topPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
@@ -55,6 +65,7 @@ public class TcPosApplication extends JFrame {
         topPanel.add(scanButton);
         add(topPanel, BorderLayout.NORTH);
 
+        // Center Panel: Cart Table
         String[] columns = {"Product", "Price", "Quantity", "Subtotal"};
         tableModel = new DefaultTableModel(columns, 0) {
             @Override
@@ -71,10 +82,60 @@ public class TcPosApplication extends JFrame {
         cartTable.getColumnModel().getColumn(1).setPreferredWidth(60);
         cartTable.getColumnModel().getColumn(2).setPreferredWidth(60);
         cartTable.getColumnModel().getColumn(3).setPreferredWidth(80);
-        JScrollPane scrollPane = new JScrollPane(cartTable);
-        scrollPane.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
-        add(scrollPane, BorderLayout.CENTER);
+        JScrollPane cartScrollPane = new JScrollPane(cartTable);
+        cartScrollPane.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
 
+        // Add Key Listener to cartTable for 'Q' (after creating cartTable)
+        cartTable.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyPressed(KeyEvent e) {
+                if ((e.getKeyChar() == 'Q' || e.getKeyChar() == 'q') && cartTable.getSelectedRow() >= 0) {
+                    modifyQuantity();
+                }
+            }
+        });
+
+        // Ensure cartTable gets focus when an item is selected
+        cartTable.getSelectionModel().addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting() && cartTable.getSelectedRow() >= 0) {
+                cartTable.requestFocusInWindow(); // Focus the table
+            }
+        });
+
+        // Right Panel: Search Field and Results
+        JPanel rightPanel = new JPanel(new BorderLayout(5, 5));
+        rightPanel.setBackground(new Color(240, 240, 240));
+        rightPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        JLabel searchLabel = new JLabel("Search Products:");
+        searchLabel.setFont(new Font("Arial", Font.PLAIN, 14));
+        rightPanel.add(searchLabel, BorderLayout.NORTH);
+        searchField = new JTextField(20); // Increased width for better usability
+        searchField.setFont(new Font("Arial", Font.PLAIN, 14));
+        rightPanel.add(searchField, BorderLayout.CENTER);
+        searchResultsModel = new DefaultListModel<>();
+        searchResultsList = new JList<>(searchResultsModel);
+        searchResultsList.setFont(new Font("Arial", Font.PLAIN, 12));
+        searchResultsList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        searchResultsList.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
+                JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                Product product = (Product) value;
+                label.setText(product.getName() + " (R" + String.format("%.2f", product.getPrice()) + ")");
+                return label;
+            }
+        });
+        JScrollPane searchScrollPane = new JScrollPane(searchResultsList);
+        searchScrollPane.setPreferredSize(new Dimension(250, 400)); // Increased size for visibility
+        rightPanel.add(searchScrollPane, BorderLayout.SOUTH);
+
+        // Split Center and Right Panels
+        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, cartScrollPane, rightPanel);
+        splitPane.setDividerLocation(700); // Adjusted for better split
+        splitPane.setResizeWeight(0.7); // Cart takes 70% of space initially
+        add(splitPane, BorderLayout.CENTER);
+
+        // Bottom Panel: Total and Buttons
         JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 15, 10));
         bottomPanel.setBackground(new Color(240, 240, 240));
         bottomPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
@@ -94,10 +155,29 @@ public class TcPosApplication extends JFrame {
         bottomPanel.add(checkoutButton);
         add(bottomPanel, BorderLayout.SOUTH);
 
+        // Action Listeners
         scanButton.addActionListener(e -> scanBarcode());
         barcodeField.addActionListener(e -> scanButton.doClick());
         removeButton.addActionListener(e -> removeSelectedItem());
         checkoutButton.addActionListener(e -> checkout());
+        searchField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) { searchProducts(); }
+            @Override
+            public void removeUpdate(DocumentEvent e) { searchProducts(); }
+            @Override
+            public void changedUpdate(DocumentEvent e) { searchProducts(); }
+        });
+        searchResultsList.addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                Product selected = searchResultsList.getSelectedValue();
+                if (selected != null) {
+                    addItemToCart(selected.getBarcode());
+                    searchResultsList.clearSelection(); // Clear selection after adding
+                    searchField.setText(""); // Clear search field after selection
+                }
+            }
+        });
 
         barcodeField.requestFocus();
     }
@@ -141,6 +221,70 @@ public class TcPosApplication extends JFrame {
         } catch (IOException ex) {
             ex.printStackTrace();
             JOptionPane.showMessageDialog(this, "Error connecting to backend!", "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void searchProducts() {
+        String query = searchField.getText().trim();
+        if (query.isEmpty()) {
+            searchResultsModel.clear();
+            return;
+        }
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString());
+            HttpGet request = new HttpGet("http://localhost:8080/api/products/search?name=" + encodedQuery);
+            try (CloseableHttpResponse response = client.execute(request)) {
+                String json = EntityUtils.toString(response.getEntity());
+                ObjectMapper mapper = new ObjectMapper();
+                // Handle empty or null response
+                if (json == null || json.trim().isEmpty()) {
+                    searchResultsModel.clear();
+                    return;
+                }
+                // Try to parse as JSON array, default to empty array if invalid
+                Product[] products = mapper.readValue(json, Product[].class);
+                searchResultsModel.clear();
+                for (Product product : products) {
+                    if (product.getStock() > 0) {
+                        searchResultsModel.addElement(product);
+                    }
+                }
+            }
+        } catch (IOException ex) {
+            ex.printStackTrace();
+            JOptionPane.showMessageDialog(this, "Error searching products: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void modifyQuantity() {
+        int selectedRow = cartTable.getSelectedRow();
+        if (selectedRow < 0 || selectedRow >= cart.size()) {
+            JOptionPane.showMessageDialog(this, "Please select an item in the cart!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        SaleItem item = cart.get(selectedRow);
+        String input = JOptionPane.showInputDialog(this, "Enter new quantity for " + item.getProduct().getName() + " (current: " + item.getQuantity() + "):", "Modify Quantity", JOptionPane.QUESTION_MESSAGE);
+        if (input != null && !input.trim().isEmpty()) {
+            try {
+                int newQuantity = Integer.parseInt(input.trim());
+                if (newQuantity <= 0) {
+                    JOptionPane.showMessageDialog(this, "Quantity must be greater than 0!", "Error", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
+                // Check if enough stock is available
+                Product product = item.getProduct();
+                if (newQuantity > product.getStock()) {
+                    JOptionPane.showMessageDialog(this, "Not enough stock available! (Max: " + product.getStock() + ")", "Error", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
+                item.setQuantity(newQuantity);
+                calculateTotal();
+                updateCartDisplay();
+                JOptionPane.showMessageDialog(this, "Quantity updated to " + newQuantity + " for " + product.getName(), "Success", JOptionPane.INFORMATION_MESSAGE);
+            } catch (NumberFormatException ex) {
+                JOptionPane.showMessageDialog(this, "Please enter a valid number!", "Error", JOptionPane.ERROR_MESSAGE);
+            }
         }
     }
 
@@ -238,3 +382,4 @@ public class TcPosApplication extends JFrame {
         });
     }
 }
+
