@@ -19,14 +19,14 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
+import java.io.*;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Properties;
 
 public class TcPosApplication extends JFrame {
     private JTextField barcodeField;
@@ -38,8 +38,18 @@ public class TcPosApplication extends JFrame {
     private JTextField searchField;
     private JList<Product> searchResultsList;
     private DefaultListModel<Product> searchResultsModel;
+    private String loggedInUserId; // Store logged-in user ID
+    private Properties config;     // Configuration properties
 
     public TcPosApplication() {
+        // Load configuration
+        config = loadConfig();
+
+        // Show login dialog before main UI
+        if (!showLoginDialog()) {
+            System.exit(0); // Exit if login fails
+        }
+
         cart = new ArrayList<>();
         total = 0.0;
 
@@ -182,18 +192,63 @@ public class TcPosApplication extends JFrame {
         barcodeField.requestFocus();
     }
 
+    private Properties loadConfig() {
+        Properties props = new Properties();
+        try (InputStream input = TcPosApplication.class.getClassLoader().getResourceAsStream("application.properties")) {
+            if (input == null) {
+                throw new IOException("Unable to find application.properties");
+            }
+            props.load(input);
+        } catch (IOException ex) {
+            ex.printStackTrace();
+            JOptionPane.showMessageDialog(this, "Error loading configuration: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+            System.exit(1);
+        }
+        return props;
+    }
+
+    private boolean showLoginDialog() {
+        JTextField usernameField = new JTextField(15);
+        JPasswordField passwordField = new JPasswordField(15);
+        JPanel panel = new JPanel(new GridLayout(2, 2, 10, 10));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        panel.add(new JLabel("Username:"));
+        panel.add(usernameField);
+        panel.add(new JLabel("Password:"));
+        panel.add(passwordField);
+
+        int result = JOptionPane.showConfirmDialog(null, panel, "Login to TC-POS", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (result == JOptionPane.OK_OPTION) {
+            String username = usernameField.getText().trim();
+            String password = new String(passwordField.getPassword()).trim();
+            // Use config values for login
+            String configUsername = config.getProperty("login.username");
+            String configPassword = config.getProperty("login.password");
+            if (configUsername.equals(username) && configPassword.equals(password)) {
+                loggedInUserId = username; // Store user ID
+                return true;
+            } else {
+                JOptionPane.showMessageDialog(this, "Invalid username or password!", "Login Failed", JOptionPane.ERROR_MESSAGE);
+                return false;
+            }
+        }
+        return false;
+    }
+
     private void scanBarcode() {
         String barcode = barcodeField.getText().trim();
         if (!barcode.isEmpty()) {
-            addItemToCart(barcode);
+            String endpoint = config.getProperty("endpoint.product").replace("{barcode}", barcode);
+            String url = config.getProperty("backend.host") + config.getProperty("backend.root") + endpoint;
+            addItemToCart(url);
             barcodeField.setText("");
             barcodeField.requestFocus();
         }
     }
 
-    private void addItemToCart(String barcode) {
+    private void addItemToCart(String url) {
         try (CloseableHttpClient client = HttpClients.createDefault()) {
-            HttpGet request = new HttpGet("http://localhost:8080/api/products/" + barcode);
+            HttpGet request = new HttpGet(url);
             try (CloseableHttpResponse response = client.execute(request)) {
                 String json = EntityUtils.toString(response.getEntity());
                 ObjectMapper mapper = new ObjectMapper();
@@ -232,7 +287,9 @@ public class TcPosApplication extends JFrame {
         }
         try (CloseableHttpClient client = HttpClients.createDefault()) {
             String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString());
-            HttpGet request = new HttpGet("http://localhost:8080/api/products/search?name=" + encodedQuery);
+            String endpoint = config.getProperty("endpoint.search") + "?name=" + encodedQuery;
+            String url = config.getProperty("backend.host") + config.getProperty("backend.root") + endpoint;
+            HttpGet request = new HttpGet(url);
             try (CloseableHttpResponse response = client.execute(request)) {
                 String json = EntityUtils.toString(response.getEntity());
                 ObjectMapper mapper = new ObjectMapper();
@@ -319,28 +376,40 @@ public class TcPosApplication extends JFrame {
             JOptionPane.showMessageDialog(this, "Cart is empty!", "Error", JOptionPane.WARNING_MESSAGE);
             return;
         }
+        if (loggedInUserId == null) {
+            JOptionPane.showMessageDialog(this, "Please log in to process a sale!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
         try (CloseableHttpClient client = HttpClients.createDefault()) {
-            HttpPost request = new HttpPost("http://localhost:8080/api/sales");
+            String endpoint = config.getProperty("endpoint.sales");
+            String url = config.getProperty("backend.host") + config.getProperty("backend.root") + endpoint;
+            HttpPost request = new HttpPost(url);
+            request.setHeader("User-Id", loggedInUserId); // Add user ID to header
             ObjectMapper mapper = new ObjectMapper();
             String json = mapper.writeValueAsString(cart);
             request.setEntity(new StringEntity(json));
             request.setHeader("Content-Type", "application/json");
             try (CloseableHttpResponse response = client.execute(request)) {
-                printReceipt();
+                String responseJson = EntityUtils.toString(response.getEntity());
+                Sale sale = mapper.readValue(responseJson, Sale.class);
+                printReceipt(sale.getTransactionNumber(), config.getProperty("till.number"), loggedInUserId);
                 cart.clear();
                 calculateTotal();
                 updateCartDisplay();
-                JOptionPane.showMessageDialog(this, "Sale completed!", "Success", JOptionPane.INFORMATION_MESSAGE);
+                JOptionPane.showMessageDialog(this, "Sale completed! Transaction Number: " + sale.getTransactionNumber(), "Success", JOptionPane.INFORMATION_MESSAGE);
             }
         } catch (IOException ex) {
             ex.printStackTrace();
-            JOptionPane.showMessageDialog(this, "Error processing sale!", "Error", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Error processing sale: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
-    private void printReceipt() {
+    private void printReceipt(String transactionNumber, String tillNumber, String userId) {
         StringBuilder receipt = new StringBuilder();
         receipt.append("----- TC-POS Receipt -----\n");
+        receipt.append("Transaction #: ").append(transactionNumber).append("\n");
+        receipt.append("Till #: ").append(tillNumber).append("\n");
+        receipt.append("Cashier: ").append(userId).append("\n");
         receipt.append("Date: ").append(new SimpleDateFormat("MM/dd/yyyy HH:mm:ss").format(new Date())).append("\n");
         receipt.append("--------------------------\n");
         for (SaleItem item : cart) {
@@ -382,4 +451,3 @@ public class TcPosApplication extends JFrame {
         });
     }
 }
-
